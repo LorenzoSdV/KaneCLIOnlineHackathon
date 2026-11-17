@@ -1,0 +1,4 @@
+[submodule "Specula"]
+	path = Specula
+	url = https://github.com/LorenzoSdV/Specula.git
+	branch = web-profile
