@@ -1,0 +1,15 @@
+SPECIFICATION TraceSpec
+CONSTANTS
+    Txns = {"T1", "T2", "T3"}
+    Tables = {"t"}
+    Keys = {1, 2, 3}
+    UniqueCols <- TraceUniqueCols
+    InitRows <- TraceInitRows
+    AutoIso = "RC"
+    Absent = Absent
+    NoTxn = NoTxn
+    NoWrite = NoWrite
+    TracePath = "@TRACE@"
+    Cut @CUT@
+INVARIANT TraceNotDone
+CHECK_DEADLOCK FALSE
