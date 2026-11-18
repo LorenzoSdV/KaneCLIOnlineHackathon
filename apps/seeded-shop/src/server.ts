@@ -54,6 +54,15 @@ const checkoutSchema = {
   },
 } as const;
 
+const restockSchema = {
+  body: {
+    type: "object",
+    required: ["quantity"],
+    additionalProperties: false,
+    properties: { quantity: { type: "integer", minimum: 1, maximum: 100 } },
+  },
+} as const;
+
 export function buildServer() {
   const app = Fastify({ logger: process.env.LOG_LEVEL ? { level: process.env.LOG_LEVEL } : false });
 
@@ -123,6 +132,25 @@ export function buildServer() {
       throw err;
     }
   });
+
+  // Adds stock to a product. The row is locked first, so concurrent restocks add up.
+  app.post<{ Params: { id: string }; Body: { quantity: number } }>(
+    "/products/:id/restock",
+    { schema: restockSchema },
+    async (req) => {
+      await authenticate(req);
+      const productId = Number(req.params.id);
+      const stock = await prisma.$transaction(async (tx) => {
+        const rows = await tx.$queryRaw<{ stock: number }[]>`
+          SELECT "stock" FROM "Product" WHERE "id" = ${productId} FOR UPDATE`;
+        if (rows.length === 0) throw new HttpError(404, "product not found");
+        const next = rows[0].stock + req.body.quantity;
+        await tx.product.update({ where: { id: productId }, data: { stock: next } });
+        return next;
+      });
+      return { id: productId, stock };
+    },
+  );
 
   app.post<{ Params: { id: string } }>("/orders/:id/cancel", async (req) => {
     const user = await authenticate(req);

@@ -24,6 +24,7 @@ All order endpoints authenticate with `Authorization: Bearer <apiToken>`.
 | `GET` | `/orders` | The caller's orders |
 | `POST` | `/checkout` | Place an order: `{ "productId", "quantity", "couponCode"? }` |
 | `POST` | `/orders/:id/cancel` | Cancel a pending order and return its stock |
+| `POST` | `/products/:id/restock` | Add stock: `{ "quantity" }`. Concurrent restocks all count |
 
 ### Checkout guarantees
 

@@ -38,6 +38,16 @@ This file is the ground truth used to score pipeline runs.
 - **Expected:** no finding. A reported coupon double-redemption is a false positive: the model is missing the UNIQUE constraint (Case B, SPEC_REPAIR).
 - **Sanity check:** three concurrent redemptions gave statuses `[201, 409, 409]` and stock 99, with 0 anomalies in 15 runs.
 
+## C2 — restock with SELECT ... FOR UPDATE (correct; control for lock modelling)
+
+- **Where:** `src/server.ts`, `POST /products/:id/restock`: `$queryRaw SELECT "stock" ... FOR UPDATE`, then
+  `product.update({ stock: next })`, an absolute write computed in the app, inside one transaction.
+- **Why it is correct:** the row lock makes a concurrent restock wait. Under READ COMMITTED its locked read
+  then returns the committed stock, so both increments count.
+- **Expected:** no finding. A reported lost restock is a false positive: the model reads the row with a
+  plain SELECT and misses the lock. Step 7's scheduled replay stops with `LockBlocked`, giving a
+  SPEC_REPAIR that cites the `FOR UPDATE`. This is M5b loop test L3.
+
 ## Notes on other behavior (not planted; do not score)
 
 - Incidental defect found by M3 trace validation: a request with `content-type: application/json` and an
