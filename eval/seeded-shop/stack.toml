@@ -1,0 +1,27 @@
+# webkit stack config for seeded-shop (read by webkit/stack/wkstack.py).
+# Kept outside apps/seeded-shop so the app directory stays exactly what an agent sees.
+
+[app]
+compose = "../../apps/seeded-shop/compose.yaml"
+project = "seeded-shop"
+service = "app"
+port = 3000
+runtime = "node"
+health_path = "/health"
+probe_path = "/products/1"
+
+[app.env]
+# Fewer connections than concurrent requests, so requests share pooled connections.
+DB_POOL_SIZE = "2"
+
+[db]
+service = "db"
+kind = "postgres"
+port = 5432
+user = "shop"
+password = "shop"
+database = "shop"
+url_env = "DATABASE_URL"
+
+[inbound]
+host_port = 8080
