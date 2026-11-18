@@ -33,6 +33,7 @@ LastItemInputs == {In("Checkout", "tok-alice", 1, 1, "", "", 0), In("Checkout", 
 RetryInputs    == {In("Checkout", "tok-bob", 2, 1, "", "k1", 0)}
 CouponInputs   == {In("Checkout", "tok-bob", 2, 1, "WELCOME10", "", 0)}
 CancelInputs   == {In("Checkout", "tok-bob", 2, 1, "", "", 0), In("Cancel", "tok-bob", 0, 0, "", "", 1)}
+RestockInputs  == {In("Restock", "tok-alice", 2, 1, "", "", 0), In("Restock", "tok-carol", 2, 2, "", "", 0)}
 AllInputs      == LastItemInputs \cup RetryInputs \cup CouponInputs \cup CancelInputs
                   \cup {In("GetProduct", "", 1, 0, "", "", 0)}
 
@@ -57,5 +58,14 @@ StockConserved ==
                                             ELSE LET k == CHOOSE k \in S : TRUE
                                                  IN Committed("Order", k).quantity + qty[S \ {k}]
               IN qty[live]
+
+\* README: "concurrent restocks all count". When every request is done, product 2's stock is its
+\* initial stock plus the quantities of the restocks that succeeded (restock hunts only).
+RestocksAllCount ==
+    (\A r \in Txns : pc[r] = "done") =>
+        LET ok == {r \in Txns : rq[r].route = "Restock" /\ rs[r].status = 200 /\ rq[r].productId = 2}
+            sum[S \in SUBSET ok] == IF S = {} THEN 0
+                                    ELSE LET r == CHOOSE r \in S : TRUE IN rq[r].quantity + sum[S \ {r}]
+        IN Committed("Product", 2).stock = MCInitRows["Product"][2].stock + sum[ok]
 
 =============================================================================

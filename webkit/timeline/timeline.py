@@ -125,8 +125,11 @@ def main() -> int:
         issued = actor != "db" and after["sq"][actor] > before["sq"][actor]
         if actor != "db" and before["sq"][actor] == 0 and not issued and actor not in inputs:
             inputs[actor] = {k: v for k, v in ctx.items() if k != args.actor_param}
+        # The model lets the statement wait on locks only if it is still in flight after the step.
+        may_wait = issued and after["stmt"][actor]["kind"] != "none"
         steps.append({"actor": actor, "action": info["name"], "kind": kind, "text": text,
-                      "statement": issued, "line": info.get("location", {}).get("beginLine")})
+                      "statement": issued, "may_wait": may_wait,
+                      "line": info.get("location", {}).get("beginLine")})
     first = ce["action"][0][0][1]
     last = ce["action"][-1][2][1]
     actors = sorted({s["actor"] for s in steps if s["actor"] != "db"}) + ["db"]
@@ -147,7 +150,8 @@ def main() -> int:
         print(f"  {line}")
 
     if args.schedule_out:
-        order = [{"step": n, "actor": s["actor"], "action": s["action"], "text": s["text"]}
+        order = [{"step": n, "actor": s["actor"], "action": s["action"], "text": s["text"],
+                  "may_wait": s["may_wait"]}
                  for n, s in enumerate(steps, 1) if s["statement"]]
         sched = {"invariant": args.invariant, "actors": sorted(inputs), "inputs": inputs, "order": order}
         args.schedule_out.write_text(json.dumps(sched, indent=2) + "\n")

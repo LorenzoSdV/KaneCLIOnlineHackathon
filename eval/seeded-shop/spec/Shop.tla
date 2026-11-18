@@ -28,7 +28,7 @@ ShopUniqueCols ==
 \* The app runs at READ COMMITTED only, so no SERIALIZABLE row domain is needed.
 ShopRowDomain == [tb \in ShopTables |-> {}]
 
-Routes == {"Checkout", "GetProduct", "ListOrders", "Cancel", "Health"}
+Routes == {"Checkout", "GetProduct", "ListOrders", "Cancel", "Restock", "Health"}
 
 NoInput == [route |-> "", token |-> "", productId |-> 0, quantity |-> 0, couponCode |-> "",
             idem |-> "", orderId |-> 0]
@@ -68,7 +68,7 @@ RoundDiv100(n) == (2 * n + 100) \div 200
 
 \* Request arrival ---------------------------------------------------------
 
-AuthRoutes == {"Checkout", "ListOrders", "Cancel"}
+AuthRoutes == {"Checkout", "ListOrders", "Cancel", "Restock"}
 
 Arrive(r, input) ==
     /\ pc[r] = "idle"
@@ -80,6 +80,7 @@ Arrive(r, input) ==
        ELSE /\ Go(r, CASE input.route = "Checkout"   -> "co_auth"
                        [] input.route = "ListOrders" -> "lo_auth"
                        [] input.route = "Cancel"     -> "ca_auth"
+                       [] input.route = "Restock"    -> "rs_auth"
                        [] OTHER                      -> "gp_read")
             /\ UNCHANGED rs
     /\ UNCHANGED <<lv, nextId, dbVars>>
@@ -313,15 +314,70 @@ Cancel_Rollback(r) ==
     /\ Go(r, "respond")
     /\ UNCHANGED <<rq, lv, rs, nextId>>
 
+\* POST /products/:id/restock ------------------------------------------- server.ts:L137-L153
+
+Restock_Auth(r) == pc[r] = "rs_auth" /\ Auth(r, "rs_begin") /\ UNCHANGED <<rq, nextId>>
+
+Restock_Begin(r) ==
+    /\ pc[r] = "rs_begin"
+    /\ Begin(r, "RC")
+    /\ Go(r, "rs_lock")
+    /\ UNCHANGED <<rq, lv, rs, nextId>>
+
+\* L144-L145: SELECT "stock" ... FOR UPDATE (a locking read)
+Restock_LockProduct_start(r) ==
+    /\ pc[r] = "rs_lock"
+    /\ WriteStart(r, "lock", "Product", LAMBDA k, row : k = rq[r].productId)
+    /\ Go(r, "rs_lock_f")
+    /\ UNCHANGED <<rq, lv, rs, nextId>>
+
+\* L146-L147: 404 if absent; the new stock is computed in the app
+Restock_LockProduct_finish(r) ==
+    /\ pc[r] = "rs_lock_f"
+    /\ \/ /\ WriteFinish(r, LAMBDA k, row : k = rq[r].productId, LAMBDA k, row : row)
+          /\ IF Rows(r) = {}
+             THEN ToRollback(r, "rs_rollback", 404) /\ UNCHANGED lv
+             ELSE /\ SetLv(r, [lv[r] EXCEPT !.total = (CHOOSE p \in Rows(r) : TRUE)[2].stock + rq[r].quantity])
+                  /\ Go(r, "rs_set") /\ UNCHANGED rs
+       \/ Failed(r) /\ ToRollback(r, "rs_rollback", 500) /\ UNCHANGED <<lv, dbVars>>
+    /\ UNCHANGED <<rq, nextId>>
+
+\* L148: write the computed value (absolute)
+Restock_SetStock_start(r) ==
+    /\ pc[r] = "rs_set"
+    /\ WriteStart(r, "update", "Product", LAMBDA k, row : k = rq[r].productId)
+    /\ Go(r, "rs_set_f")
+    /\ UNCHANGED <<rq, lv, rs, nextId>>
+
+Restock_SetStock_finish(r) ==
+    /\ pc[r] = "rs_set_f"
+    /\ \/ /\ WriteFinish(r, LAMBDA k, row : k = rq[r].productId,
+                            LAMBDA k, row : [row EXCEPT !.stock = lv[r].total])
+          /\ Go(r, "rs_commit") /\ UNCHANGED rs
+       \/ Failed(r) /\ ToRollback(r, "rs_rollback", 500) /\ UNCHANGED dbVars
+    /\ UNCHANGED <<rq, lv, nextId>>
+
+Restock_Commit(r) ==
+    /\ pc[r] = "rs_commit"
+    /\ Commit(r)
+    /\ Reply(r, 200, rq[r].productId)
+    /\ UNCHANGED <<rq, lv, nextId>>
+
+Restock_Rollback(r) ==
+    /\ pc[r] = "rs_rollback"
+    /\ Rollback(r)
+    /\ Go(r, "respond")
+    /\ UNCHANGED <<rq, lv, rs, nextId>>
+
 \* All handler steps ----------------------------------------------------------
 
 \* The trace action name of the step request r takes next (one per SQL statement).
 StepName(r) ==
-    CASE pc[r] \in {"co_auth", "lo_auth", "ca_auth"} -> "Auth_ReadUser"
+    CASE pc[r] \in {"co_auth", "lo_auth", "ca_auth", "rs_auth"} -> "Auth_ReadUser"
       [] pc[r] = "gp_read"     -> "GetProduct_Read"
       [] pc[r] = "lo_read"     -> "ListOrders_Read"
       [] pc[r] = "co_idem"     -> "Checkout_FindByKey"
-      [] pc[r] \in {"co_begin", "ca_begin"} -> "Begin"
+      [] pc[r] \in {"co_begin", "ca_begin", "rs_begin"} -> "Begin"
       [] pc[r] = "co_product"  -> "Checkout_ReadProduct"
       [] pc[r] = "co_coupon"   -> "Checkout_ReadCoupon"
       [] pc[r] = "co_ins"      -> "Checkout_InsertOrder_start"
@@ -330,8 +386,12 @@ StepName(r) ==
       [] pc[r] = "co_red_f"    -> "Checkout_InsertRedemption_finish"
       [] pc[r] = "co_dec"      -> "Checkout_DecrementStock_start"
       [] pc[r] = "co_dec_f"    -> "Checkout_DecrementStock_finish"
-      [] pc[r] \in {"co_commit", "ca_commit"} -> "Commit"
-      [] pc[r] \in {"co_rollback", "ca_rollback"} -> "Rollback"
+      [] pc[r] \in {"co_commit", "ca_commit", "rs_commit"} -> "Commit"
+      [] pc[r] \in {"co_rollback", "ca_rollback", "rs_rollback"} -> "Rollback"
+      [] pc[r] = "rs_lock"     -> "Restock_LockProduct_start"
+      [] pc[r] = "rs_lock_f"   -> "Restock_LockProduct_finish"
+      [] pc[r] = "rs_set"      -> "Restock_SetStock_start"
+      [] pc[r] = "rs_set_f"    -> "Restock_SetStock_finish"
       [] pc[r] = "ca_mark"     -> "Cancel_MarkCancelled_start"
       [] pc[r] = "ca_mark_f"   -> "Cancel_MarkCancelled_finish"
       [] pc[r] = "ca_read"     -> "Cancel_ReadOrder"
@@ -353,5 +413,7 @@ Step(r) ==
     \/ Cancel_ReadOrder(r) \/ Cancel_DeleteRedemptions_start(r) \/ Cancel_DeleteRedemptions_finish(r)
     \/ Cancel_IncrementStock_start(r) \/ Cancel_IncrementStock_finish(r)
     \/ Cancel_Commit(r) \/ Cancel_Rollback(r)
+    \/ Restock_Auth(r) \/ Restock_Begin(r) \/ Restock_LockProduct_start(r) \/ Restock_LockProduct_finish(r)
+    \/ Restock_SetStock_start(r) \/ Restock_SetStock_finish(r) \/ Restock_Commit(r) \/ Restock_Rollback(r)
 
 =============================================================================

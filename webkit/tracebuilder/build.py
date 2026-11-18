@@ -185,12 +185,13 @@ def build(run: Path, mapping: Mapping, since: int, until: int | None) -> list[di
                 continue
             kind, table = rule["kind"], rule.get("table")
             rows = []
-            if table and s.get("columns") and s.get("rows"):
+            check_rows = rule.get("rows", True)       # rows = false: the result lacks the key; check counts only
+            if table and check_rows and s.get("columns") and s.get("rows"):
                 rows = [mapping.project(table, dict(zip(s["columns"], r))) for r in s["rows"]]
                 max_key = max([max_key] + [r["k"] for r in rows])
             tag = s.get("tag") or ""
             count = int(tag.split()[-1]) if tag and tag.split()[-1].isdigit() else len(rows)
-            common = dict(rows=rows, has_rows=bool(s.get("columns")), count=count,
+            common = dict(rows=rows, has_rows=bool(s.get("columns")) and check_rows, count=count,
                           err=s.get("error_code") or "", limit1=bool(rule.get("limit1", False)))
             lo, hi = s["t_send_ns"], s["t_done_ns"]
             if kind == "commit":

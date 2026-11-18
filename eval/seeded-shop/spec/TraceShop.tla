@@ -34,6 +34,7 @@ RouteOf(action) ==
       [] action = "GetProduct_Begin" -> "GetProduct"
       [] action = "ListOrders_Begin" -> "ListOrders"
       [] action = "Cancel_Begin"     -> "Cancel"
+      [] action = "Restock_Begin"    -> "Restock"
       [] action = "Health_Begin"     -> "Health"
 
 InputOf(e) ==

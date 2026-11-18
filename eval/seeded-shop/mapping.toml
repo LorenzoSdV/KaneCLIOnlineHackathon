@@ -48,6 +48,12 @@ match = '^POST /orders/(?P<orderId>\d+)/cancel$'
 headers = { authorization = "bearer" }
 
 [[route]]
+action = "Restock"
+match = '^POST /products/(?P<productId>\d+)/restock$'
+body = { quantity = "int" }
+headers = { authorization = "bearer" }
+
+[[route]]
 action = "Health"
 match = '^GET /health$'
 
@@ -55,6 +61,7 @@ match = '^GET /health$'
 # kind: begin | commit | rollback | select | write (UPDATE/DELETE/FOR UPDATE: can wait) | insert (can wait)
 # Matched in order against the statement text with comments removed; "route" restricts a rule to
 # requests of that route action. limit1: the query has LIMIT 1, so it returns one of the matches.
+# rows = false: the result has no key column, so only the row count is checked.
 
 [[sql]]
 action = "Begin"
@@ -119,6 +126,19 @@ action = "Checkout_InsertRedemption"
 kind = "insert"
 table = "CouponRedemption"
 match = '^INSERT INTO "public"\."CouponRedemption"'
+
+[[sql]]
+action = "Restock_LockProduct"
+kind = "write"
+table = "Product"
+match = '^SELECT "stock" FROM "Product" WHERE "id" = \$1 FOR UPDATE'
+rows = false
+
+[[sql]]
+action = "Restock_SetStock"
+kind = "write"
+table = "Product"
+match = '^UPDATE "public"\."Product" SET "stock" = \$1 WHERE'
 
 [[sql]]
 action = "Checkout_DecrementStock"

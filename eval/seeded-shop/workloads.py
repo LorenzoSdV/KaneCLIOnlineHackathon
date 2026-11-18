@@ -85,8 +85,13 @@ SCENARIOS = {
         call(*checkout("tok-carol", 1, 3)), call(*checkout("nope", 2, 1)), call("POST", "/checkout", None, {"productId": 2, "quantity": 1}),
         call("GET", "/orders", "tok-bob"), call("POST", "/orders/1/cancel", "tok-bob"),
         call("POST", "/orders/1/cancel", "tok-bob"), call("POST", "/orders/2/cancel", "tok-bob"),
+        call("POST", "/products/2/restock", "tok-alice", {"quantity": 3}),
+        call("POST", "/products/9/restock", "tok-alice", {"quantity": 1}),
         call("GET", "/products/2"),
     ],
+    # Two concurrent restocks of one product (the row lock makes the second wait).
+    "restock_race": lambda: together(("POST", "/products/2/restock", "tok-alice", {"quantity": 1}),
+                                     ("POST", "/products/2/restock", "tok-carol", {"quantity": 2})),
     # Two buyers of the last item.
     "last_item": lambda: together(checkout("tok-alice", 1, 1), checkout("tok-carol", 1, 1)),
     # A client retry overlapping the original request, same Idempotency-Key.
@@ -136,6 +141,10 @@ def main() -> int:
             lines = build.build(run, mapping, since, until)
             out.parent.mkdir(parents=True, exist_ok=True)
             out.write_text("".join(json.dumps(x) + "\n" for x in lines))
+            windows_file = run / "traces" / "windows.json"
+            windows = json.loads(windows_file.read_text()) if windows_file.exists() else {}
+            windows[out.stem] = [since, until]           # lets a different mapping rebuild the same run
+            windows_file.write_text(json.dumps(windows, indent=1))
             print(f"{out.name}: {len(lines) - 1} events, statuses {statuses}")
     return 0
 

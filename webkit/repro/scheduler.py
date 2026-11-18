@@ -138,6 +138,13 @@ def replay(schedule: dict, send: Callable[[str, str], object], gate: Gate | None
             gate.release(hold["id"])
             step.outcome = _wait_settled(gate, hold, before["sent"] if before else 0, step_timeout, poll)
             result.steps.append(step)
+            if step.outcome == "lock-wait" and not entry.get("may_wait", True):
+                blockers = _blockers(gate, hold["conn"], conn_actor)
+                raise LockBlocked(
+                    f"step {i}: {actor}'s statement ({step.expected}: {step.sql[:80]}) waits on a row lock held "
+                    f"by {', '.join(blockers)}, but the model treats it as a statement that never waits. The code "
+                    f"takes a lock the model misses, e.g. SELECT ... FOR UPDATE modelled as a plain SELECT "
+                    f"(SPEC_REPAIR evidence).", actor, blockers)
     finally:
         gate.clear()
         for t in threads:
@@ -155,8 +162,7 @@ def _wait_for_hold(gate: Gate, trace_id: str, actor: str, done: dict, step: Step
                 return h
         mine = [c for c in gate.conns() if conn_actor.get(c["conn"]) == actor and c["lock_wait"]]
         if mine:
-            pid_actor = {c["pid"]: conn_actor.get(c["conn"], f"conn {c['conn']}") for c in gate.conns()}
-            blockers = sorted({pid_actor.get(p, f"pid {p}") for p in mine[0]["blocked_by"]})
+            blockers = _blockers(gate, mine[0]["conn"], conn_actor)
             raise LockBlocked(
                 f"step {step.n}: the schedule needs {actor} to issue its next statement ({step.expected}), "
                 f"but its previous statement is waiting on a row lock held by {', '.join(blockers)}. "
@@ -170,6 +176,13 @@ def _wait_for_hold(gate: Gate, trace_id: str, actor: str, done: dict, step: Step
     raise ScheduleError(f"step {step.n}: {actor} never issued the scheduled statement ({step.expected}) "
                         f"within {timeout}s (held: {held}). Is it waiting outside the database, e.g. on "
                         f"the connection pool?")
+
+
+def _blockers(gate: Gate, conn_id: int, conn_actor: dict[int, str]) -> list[str]:
+    conns = gate.conns()
+    pid_actor = {c["pid"]: conn_actor.get(c["conn"], f"conn {c['conn']}") for c in conns}
+    me = next((c for c in conns if c["conn"] == conn_id), None)
+    return sorted({pid_actor.get(p, f"pid {p}") for p in (me or {}).get("blocked_by") or []})
 
 
 def _conn(gate: Gate, conn_id: int) -> dict | None:
