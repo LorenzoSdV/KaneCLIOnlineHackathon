@@ -51,6 +51,17 @@ Every line has `src`, `ev` and `ts_ns` (wall-clock nanoseconds when written).
 | cdc | `txn` | `xid, commit_lsn, commit_lsn_int, commit_time_ns, changes: [{op, table, new, old}]` |
 | all | `ready` | Recorder started |
 
+## Trace validation (M3)
+
+| Piece | What it does |
+|---|---|
+| `tracebuilder/build.py` | Turns a recording into a model-level trace, driven by the app's **mapping file** (e.g. `eval/seeded-shop/mapping.toml`): routes and SQL patterns to action names, modelled tables and columns. It emits one event per action, each with its time interval, results, errors, the rows each COMMIT committed (from CDC), and the initial state (replayed from CDC) |
+| `tla/WebTrace.tla` | Generic ordering. A request's own events stay in program order. Different requests' events are ordered only when their intervals don't overlap, so TLC searches the interleavings the recording leaves open (as in Specula's Category B traces) |
+| `tracecheck/check.py` | Runs TLC on traces for any app trace spec. For a rejected trace it reports the most events the model can match and the recorded events it could not match next, which is where the model and the app diverge |
+
+The app-specific parts are three files. The model (e.g. `Shop.tla`, built on `WebDB`) and its trace spec
+(`TraceShop.tla`) are what the agent writes in a pipeline run. The mapping file is configuration.
+
 ### Limits (known, to address in later milestones)
 
 - **Autocommit writes have no xid.** The xid is captured only before an explicit `COMMIT`. Such writes are matched to CDC by table and time interval in the trace builder (M3).
