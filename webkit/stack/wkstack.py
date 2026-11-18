@@ -189,6 +189,9 @@ def current(cfg: dict) -> dict:
 
 
 def cmd_down(cfg: dict, _args: argparse.Namespace) -> None:
+    if not state_file(cfg).exists():
+        print(f"down: no running stack for project {cfg['app']['project']!r} (already stopped)")
+        return
     st = current(cfg)
     subprocess.run(compose_cmd(cfg, Path(st["overlay"])) + ["down", "-v", "--remove-orphans"], check=True)
     state_file(cfg).unlink()
