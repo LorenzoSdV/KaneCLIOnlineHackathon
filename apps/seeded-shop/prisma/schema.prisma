@@ -1,0 +1,65 @@
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model User {
+  id          Int                @id @default(autoincrement())
+  email       String             @unique
+  apiToken    String             @unique
+  orders      Order[]
+  redemptions CouponRedemption[]
+}
+
+model Product {
+  id         Int     @id @default(autoincrement())
+  name       String
+  priceCents Int
+  stock      Int
+  orders     Order[]
+}
+
+enum OrderStatus {
+  PENDING
+  PAID
+  CANCELLED
+}
+
+model Order {
+  id             Int               @id @default(autoincrement())
+  userId         Int
+  productId      Int
+  quantity       Int
+  totalCents     Int
+  status         OrderStatus       @default(PENDING)
+  idempotencyKey String?
+  createdAt      DateTime          @default(now())
+  user           User              @relation(fields: [userId], references: [id])
+  product        Product           @relation(fields: [productId], references: [id])
+  redemption     CouponRedemption?
+
+  @@index([userId, idempotencyKey])
+}
+
+model Coupon {
+  id          Int                @id @default(autoincrement())
+  code        String             @unique
+  percentOff  Int
+  redemptions CouponRedemption[]
+}
+
+model CouponRedemption {
+  id       Int    @id @default(autoincrement())
+  couponId Int
+  userId   Int
+  orderId  Int    @unique
+  coupon   Coupon @relation(fields: [couponId], references: [id])
+  user     User   @relation(fields: [userId], references: [id])
+  order    Order  @relation(fields: [orderId], references: [id])
+
+  @@unique([couponId, userId])
+}
