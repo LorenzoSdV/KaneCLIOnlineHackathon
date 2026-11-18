@@ -1,0 +1,24 @@
+# Receives spans from the app's OpenTelemetry SDK and writes them as JSON lines.
+receivers:
+  otlp:
+    protocols:
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  batch:
+    timeout: 200ms
+
+exporters:
+  file:
+    path: /wk/out/otel-spans.ndjson
+
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [file]
+  telemetry:
+    logs:
+      level: warn

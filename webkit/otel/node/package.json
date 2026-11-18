@@ -1,0 +1,14 @@
+{
+  "name": "webkit-otel-node",
+  "private": true,
+  "type": "module",
+  "description": "OpenTelemetry bootstrap loaded into a Node.js app via NODE_OPTIONS; no app code changes.",
+  "dependencies": {
+    "@opentelemetry/api": "1.10.0",
+    "@opentelemetry/exporter-trace-otlp-http": "0.301.2",
+    "@opentelemetry/instrumentation": "0.301.2",
+    "@opentelemetry/instrumentation-http": "0.301.2",
+    "@opentelemetry/instrumentation-pg": "0.78.0",
+    "@opentelemetry/sdk-node": "0.301.2"
+  }
+}
