@@ -30,6 +30,15 @@ TraceInitRows ==
         ELSE Absent]]
 TraceUniqueCols == [tb \in {"t"} |-> << {"u"} >>]
 
+\* Every row value in the trace (initial, inserted, or returned by a statement).
+\* Every value a committed row can take is returned by the statement that wrote it.
+TraceRowRecs ==
+    (UNION {{TraceLog[i].rows[j] : j \in 1..Len(TraceLog[i].rows)} :
+                i \in {i \in 1..Len(TraceLog) : TraceLog[i].ev \in {"init", "done"}}})
+    \cup {TraceLog[i].row : i \in {i \in 1..Len(TraceLog) : TraceLog[i].ev = "start" /\ TraceLog[i].kind = "insert"}}
+TraceRowDomain ==
+    [tb \in {"t"} |-> {[v |-> a, u |-> b] : a \in {r.v : r \in TraceRowRecs}, b \in {r.u : r \in TraceRowRecs}}]
+
 \* The statement DSL the harness generates.
 WhereOK(w, k, row) ==
     CASE w.op = "all"  -> TRUE

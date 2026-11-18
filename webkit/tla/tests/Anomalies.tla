@@ -25,6 +25,7 @@ ScenarioInitRows ==
           [] k = 1                                    -> [v |-> 0, u |-> k]
           [] OTHER                                    -> Absent]]
 ScenarioUniqueCols == [tb \in {"t"} |-> << {"u"} >>]
+ScenarioRowDomain == [tb \in {"t"} |-> {[v |-> a, u |-> b] : a \in -1..2, b \in 1..2}]
 
 VARIABLES pc, local, ok
 vars == <<dbVars, pc, local, ok>>

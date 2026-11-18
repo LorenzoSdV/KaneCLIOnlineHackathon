@@ -37,6 +37,9 @@ Next == (\E r \in Requests : AppSteps(r)) \/ (DBSilent /\ UNCHANGED appVars)
   `rows` (a set of `<<key, row>>`). After an error, the transaction is failed: `FailedStmt(t)` gives `25P02`
   until `Commit` or `Rollback`.
 - **Invariants** read committed state with `Committed(tb, k)` and `CommittedKeys(tb)`.
+- **`RowDomain`** (`[Tables -> SUBSET row]`) must list every row value the model can produce, for example the
+  product of the column domains. It is only used for SERIALIZABLE transactions, so models that never use
+  SERIALIZABLE pay nothing for it.
 
 ## What is modelled
 
@@ -63,14 +66,25 @@ Next == (\E r \in Requests : AppSteps(r)) \/ (DBSilent /\ UNCHANGED appVars)
   - Unique checks see every committed row, even ones outside the snapshot.
 - **Errors abort the transaction immediately.** Locks are released and writes dropped.
 
-## Known gaps (v1)
+- **SERIALIZABLE** is REPEATABLE READ plus PostgreSQL's guarantee: the committed SERIALIZABLE transactions
+  are serializable.
+  - WebDB records each SERIALIZABLE transaction's predicate reads and writes.
+  - A `COMMIT` that would close a dependency cycle among committed SERIALIZABLE transactions cannot succeed.
+    Cycles can be made of write–write, write–read and read–write edges.
+  - Beyond that, `40001` is allowed at any statement or `COMMIT`. PostgreSQL's SSI also aborts
+    conservatively, depending on lock granularity and memory limits, which are not modelled.
+  - Transactions at other levels are invisible to SSI, as in PostgreSQL. So a cycle that passes through a
+    READ COMMITTED transaction is not prevented.
+  - Predicates of SERIALIZABLE reads are evaluated over the constant `RowDomain`, which must contain every row
+    value the model can produce.
 
-- **SERIALIZABLE is over-approximated.** It is modelled as REPEATABLE READ plus a `40001` allowed at any
-  statement or commit. That accepts every real execution, but it also lets write skew commit, which
-  PostgreSQL's SSI prevents. A violation found only at SERIALIZABLE may therefore be a false positive; step 7
-  reproduction catches it.
+## Known gaps
+
 - **Not modelled:** FOR SHARE and KEY SHARE locks (so foreign-key lock waits), CHECK constraints,
   `ON CONFLICT`, savepoints, advisory locks, and UPDATEs that change a UNIQUE column.
+- **Unique checks are not SERIALIZABLE reads.** The index reads an INSERT does for its unique check are not
+  recorded. That can only miss a dependency, which makes the model slightly more permissive, never stricter
+  than PostgreSQL.
 
 ## Validation
 
@@ -97,3 +111,10 @@ python3 tla/difftest/coverage.py /tmp/traces/rc
 `tests/run.py` model-checks small two-actor scenarios (lost update, atomic increment, oversell, write skew)
 at each isolation level and compares the result with PostgreSQL's documented behavior. Each run also checks
 non-vacuity: a behavior in which both actors commit must be reachable.
+
+| Scenario | READ COMMITTED | REPEATABLE READ | SERIALIZABLE |
+|---|---|---|---|
+| lost update (read, then write the computed value) | anomaly | prevented | prevented |
+| atomic increment (`SET v = v + 1`) | prevented | prevented | prevented |
+| oversell (check stock, then decrement) | anomaly | prevented | prevented |
+| write skew (both check, each updates a different row) | anomaly | anomaly | prevented |

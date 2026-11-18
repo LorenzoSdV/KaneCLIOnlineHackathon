@@ -19,15 +19,13 @@ LIB = REPO / "Specula" / "lib"
 CP = f"{LIB / 'tla2tools.jar'}{os.pathsep}{LIB / 'CommunityModules-deps.jar'}"
 
 # (scenario, iso) -> True if PostgreSQL allows the anomaly, i.e. Property must be violated.
-# SERIALIZABLE write skew: PostgreSQL prevents it, but WebDB v1 over-approximates SSI
-# (snapshot isolation + allowed aborts), so it is expected to be reachable in the model.
 EXPECTED = {
     ("lost_update", "RC"): True, ("lost_update", "RR"): False, ("lost_update", "SER"): False,
     ("atomic_increment", "RC"): False, ("atomic_increment", "RR"): False, ("atomic_increment", "SER"): False,
     ("oversell", "RC"): True, ("oversell", "RR"): False, ("oversell", "SER"): False,
-    ("write_skew", "RC"): True, ("write_skew", "RR"): True, ("write_skew", "SER"): True,
+    ("write_skew", "RC"): True, ("write_skew", "RR"): True, ("write_skew", "SER"): False,
 }
-OVER_APPROX = {("write_skew", "SER")}
+OVER_APPROX: set[tuple[str, str]] = set()
 
 CFG = """SPECIFICATION Spec
 CONSTANTS
@@ -36,6 +34,7 @@ CONSTANTS
     Keys = {{1, 2}}
     UniqueCols <- ScenarioUniqueCols
     InitRows <- ScenarioInitRows
+    RowDomain <- ScenarioRowDomain
     AutoIso = "RC"
     Absent = Absent
     NoTxn = NoTxn
