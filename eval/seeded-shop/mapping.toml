@@ -1,0 +1,158 @@
+# How seeded-shop's recorded events map to model actions (read by webkit/tracebuilder/build.py).
+#
+# In a real pipeline run the agent writes this file in the harness phase, from the
+# model's instrumentation-spec.md. It is configuration only: no app code changes.
+
+# ---- Modeled tables: key column and the columns the model keeps (with types) -------------------
+[tables.User]
+key = "id"
+columns = { apiToken = "text" }
+
+[tables.Product]
+key = "id"
+columns = { priceCents = "int", stock = "int" }
+
+[tables.Order]
+key = "id"
+columns = { userId = "int", productId = "int", quantity = "int", totalCents = "int", status = "text", idempotencyKey = "text" }
+
+[tables.Coupon]
+key = "id"
+columns = { code = "text", percentOff = "int" }
+
+[tables.CouponRedemption]
+key = "id"
+columns = { couponId = "int", userId = "int", orderId = "int" }
+
+# ---- HTTP routes: one actor per request; Begin/End events carry its inputs and response --------
+# Named regex groups become arguments; body fields are parsed from JSON; headers are listed.
+[[route]]
+action = "Checkout"
+match = '^POST /checkout$'
+body = { productId = "int", quantity = "int", couponCode = "text" }
+headers = { authorization = "bearer", "idempotency-key" = "text" }
+response = { id = "int" }
+
+[[route]]
+action = "GetProduct"
+match = '^GET /products/(?P<productId>\d+)$'
+
+[[route]]
+action = "ListOrders"
+match = '^GET /orders$'
+headers = { authorization = "bearer" }
+
+[[route]]
+action = "Cancel"
+match = '^POST /orders/(?P<orderId>\d+)/cancel$'
+headers = { authorization = "bearer" }
+
+[[route]]
+action = "Health"
+match = '^GET /health$'
+
+# ---- SQL statements -----------------------------------------------------------------------------
+# kind: begin | commit | rollback | select | write (UPDATE/DELETE/FOR UPDATE: can wait) | insert (can wait)
+# Matched in order against the statement text with comments removed; "route" restricts a rule to
+# requests of that route action. limit1: the query has LIMIT 1, so it returns one of the matches.
+
+[[sql]]
+action = "Begin"
+kind = "begin"
+match = '^BEGIN'
+
+[[sql]]
+action = "Commit"
+kind = "commit"
+match = '^COMMIT'
+
+[[sql]]
+action = "Rollback"
+kind = "rollback"
+match = '^ROLLBACK'
+
+[[sql]]
+action = "Auth_ReadUser"
+kind = "select"
+table = "User"
+match = 'FROM "public"\."User" WHERE \("public"\."User"\."apiToken" = '
+limit1 = true
+
+[[sql]]
+action = "Checkout_FindByKey"
+kind = "select"
+table = "Order"
+match = 'FROM "public"\."Order" WHERE \("public"\."Order"\."userId" = \$1 AND "public"\."Order"\."idempotencyKey" = \$2\)'
+limit1 = true
+
+[[sql]]
+action = "Checkout_ReadProduct"
+route = "Checkout"
+kind = "select"
+table = "Product"
+match = 'FROM "public"\."Product" WHERE \("public"\."Product"\."id" = '
+limit1 = true
+
+[[sql]]
+action = "GetProduct_Read"
+route = "GetProduct"
+kind = "select"
+table = "Product"
+match = 'FROM "public"\."Product" WHERE \("public"\."Product"\."id" = '
+limit1 = true
+
+[[sql]]
+action = "Checkout_ReadCoupon"
+kind = "select"
+table = "Coupon"
+match = 'FROM "public"\."Coupon" WHERE \("public"\."Coupon"\."code" = '
+limit1 = true
+
+[[sql]]
+action = "Checkout_InsertOrder"
+kind = "insert"
+table = "Order"
+match = '^INSERT INTO "public"\."Order"'
+
+[[sql]]
+action = "Checkout_InsertRedemption"
+kind = "insert"
+table = "CouponRedemption"
+match = '^INSERT INTO "public"\."CouponRedemption"'
+
+[[sql]]
+action = "Checkout_DecrementStock"
+kind = "write"
+table = "Product"
+match = '^UPDATE "public"\."Product" SET "stock" = \("public"\."Product"\."stock" - '
+
+[[sql]]
+action = "ListOrders_Read"
+kind = "select"
+table = "Order"
+match = 'FROM "public"\."Order" WHERE "public"\."Order"\."userId" = \$1 ORDER BY'
+
+[[sql]]
+action = "Cancel_MarkCancelled"
+kind = "write"
+table = "Order"
+match = '^UPDATE "public"\."Order" SET "status"'
+
+[[sql]]
+action = "Cancel_ReadOrder"
+kind = "select"
+table = "Order"
+match = 'FROM "public"\."Order" WHERE \("public"\."Order"\."id" = '
+limit1 = true
+
+[[sql]]
+action = "Cancel_DeleteRedemptions"
+kind = "write"
+table = "CouponRedemption"
+match = '^DELETE FROM "public"\."CouponRedemption"'
+
+[[sql]]
+action = "Cancel_IncrementStock"
+kind = "write"
+table = "Product"
+match = '^UPDATE "public"\."Product" SET "stock" = \("public"\."Product"\."stock" \+ '

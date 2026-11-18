@@ -40,5 +40,11 @@ This file is the ground truth used to score pipeline runs.
 
 ## Notes on other behavior (not planted; do not score)
 
+- Incidental defect found by M3 trace validation: a request with `content-type: application/json` and an
+  empty body (e.g. `POST /orders/1/cancel` sent that way) gets **500** instead of 400. Fastify rejects the
+  empty JSON body with a 400 error, but the app's error handler only special-cases `HttpError` and validation
+  errors, so it reports 500. It is a sequential input-handling defect, outside the concurrency scope; leave it
+  unfixed and do not score it.
+
 - `POST /orders/:id/cancel` uses a conditional `updateMany` on `status: PENDING`, so a double cancel cannot restore stock twice.
 - If B1 lets stock go to −1, cancelling restores it by the order's quantity. That is consistent behavior given B1, not a separate bug.

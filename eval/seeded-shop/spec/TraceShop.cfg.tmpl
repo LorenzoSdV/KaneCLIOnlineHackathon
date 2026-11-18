@@ -1,0 +1,16 @@
+SPECIFICATION TraceSpec
+CONSTANTS
+    Txns <- TraceActors
+    Tables <- ShopTables
+    Keys <- TraceKeys
+    UniqueCols <- ShopUniqueCols
+    InitRows <- TraceInitRows
+    RowDomain <- ShopRowDomain
+    AutoIso = "RC"
+    Absent = Absent
+    NoTxn = NoTxn
+    NoWrite = NoWrite
+    TracePath = "@TRACE@"
+    Cut @CUT@
+INVARIANT TraceNotDone
+CHECK_DEADLOCK FALSE
