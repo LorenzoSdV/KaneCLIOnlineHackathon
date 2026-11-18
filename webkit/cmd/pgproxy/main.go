@@ -18,6 +18,8 @@
 //	WK_OUT       output NDJSON file        (default "/wk/out/pgproxy.ndjson")
 //	WK_MAX_ROWS  result rows kept per stmt (default 50)
 //	WK_XID       "0" disables xid capture  (default on)
+//	WK_CONTROL   control API address       (default ":6433"; see gate.go)
+//	WK_DB_URL    direct DB URL, for lock-wait detection in the control API
 package main
 
 import (
@@ -83,6 +85,7 @@ func main() {
 	}
 	w.Emit("ready", map[string]any{"listen": cfg.listen, "upstream": cfg.upstream})
 	log.Printf("wk-pgproxy listening on %s -> %s", cfg.listen, cfg.upstream)
+	go serveControl(env("WK_CONTROL", ":6433"), os.Getenv("WK_DB_URL"), w)
 
 	var connSeq atomic.Int64
 	for {
@@ -144,6 +147,8 @@ func handle(client net.Conn, id int64, cfg config, w *ndjson.Writer) {
 		id: id, cfg: cfg, w: w, client: client, server: server,
 		txStatus: 'I', prepared: map[string]string{}, portals: map[string]portal{},
 	}
+	gate.register(s)
+	defer gate.unregister(s)
 	done := make(chan struct{})
 	go func() {
 		s.serverToClient(bufio.NewReader(server))
@@ -197,6 +202,7 @@ type session struct {
 	client, server net.Conn
 
 	mu          sync.Mutex
+	pid         uint32 // server backend process id (BackendKeyData)
 	queue       []*item
 	txStatus    byte // from the last ReadyForQuery: 'I' idle, 'T' in txn, 'E' failed txn
 	txnSeq      int64
@@ -204,7 +210,8 @@ type session struct {
 	txnTraceID  string
 	lastTag     string
 	pendingXid  string
-	stmtSeq     int64
+	stmtSeq     int64 // statements sent to the server
+	finished    int64 // statements whose result came back
 	prepared    map[string]string
 	portals     map[string]portal
 	nextRowDesc *pgproto3.RowDescription // from Describe(portal), for the following Execute
@@ -238,6 +245,9 @@ func (s *session) clientToServer(r *bufio.Reader) {
 		typ, body, raw, err := pgwire.ReadMessage(r)
 		if err != nil {
 			return
+		}
+		if typ == 'Q' || typ == 'P' {
+			gate.wait(s, queryText(typ, body), s.w) // blocks while the statement is held
 		}
 		inject := false
 		s.mu.Lock()
@@ -349,6 +359,11 @@ func (s *session) onServerMessage(typ byte, body []byte) bool {
 	}
 
 	switch typ {
+	case 'K': // BackendKeyData
+		var m pgproto3.BackendKeyData
+		if m.Decode(body) == nil {
+			s.pid = m.ProcessID
+		}
 	case '1': // ParseComplete
 		s.popKind('P')
 	case '2': // BindComplete
@@ -494,6 +509,7 @@ func (s *session) finish(rec *stmtRec) {
 		return
 	}
 	rec.tDoneNs = ndjson.Now()
+	s.finished++
 	s.w.Emit("stmt", map[string]any{
 		"conn": rec.conn, "seq": rec.seq, "protocol": rec.protocol, "sql": rec.sql, "sql_norm": rec.sqlNorm,
 		"params": rec.params, "trace_id": rec.traceID, "span_id": rec.spanID, "txn": rec.txn,

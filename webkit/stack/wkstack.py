@@ -11,7 +11,7 @@ override from a small per-app stack config (TOML) and runs both together:
 
 Recorders added around the app (all output goes to runs/<run-id>/):
     wk-inbound  reverse proxy in front of the app      -> inbound.ndjson
-    wk-pgproxy  PostgreSQL wire proxy                  -> pgproxy.ndjson
+    wk-pgproxy  PostgreSQL wire proxy (+ hold/release control API on host port 6433) -> pgproxy.ndjson
     wk-cdc      logical decoding of committed changes  -> cdc.ndjson
     wk-otelcol  OpenTelemetry collector                -> otel-spans.ndjson
 
@@ -40,6 +40,7 @@ Stack config (TOML):
 
     [inbound]
     host_port = 8080
+    control_port = 6433                # pgproxy hold/release API (reproduction)
 """
 
 from __future__ import annotations
@@ -129,8 +130,10 @@ def overlay_yaml(cfg: dict, out_dir: Path) -> str:
         ]
         return block + (extra or [])
 
-    lines += recorder("wk-pgproxy", "pgproxy", {"WK_UPSTREAM": f"{db['service']}:{db['port']}"},
-                      ["    depends_on:", f"      {db['service']}: {{condition: service_healthy}}"])
+    control_port = cfg.get("inbound", {}).get("control_port", 6433)
+    lines += recorder("wk-pgproxy", "pgproxy", {"WK_UPSTREAM": f"{db['service']}:{db['port']}", "WK_DB_URL": direct_url},
+                      ["    ports:", f"      - \"{control_port}:6433\"",
+                       "    depends_on:", f"      {db['service']}: {{condition: service_healthy}}"])
     lines += recorder("wk-cdc", "cdc", {"WK_DB_URL": direct_url}, [
         "    depends_on:", f"      {db['service']}: {{condition: service_healthy}}",
         "    healthcheck:",

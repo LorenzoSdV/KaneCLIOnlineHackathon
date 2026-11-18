@@ -75,9 +75,10 @@ VARIABLES
     stmt,   \* per session: the in-flight statement, or NoStmt
     res,    \* per session: result of the last completed statement
     sread,  \* per session: SERIALIZABLE predicate reads so far: set of [tb, s, ext]
-    serlog  \* committed SERIALIZABLE transactions: Seq([cno, reads, writes])
+    serlog, \* committed SERIALIZABLE transactions: Seq([cno, reads, writes])
+    sq      \* per session: number of SQL statements issued so far (for counterexample tooling)
 
-dbVars == <<ver, clock, tx, wr, lk, stmt, res, sread, serlog>>
+dbVars == <<ver, clock, tx, wr, lk, stmt, res, sread, serlog, sq>>
 
 IsoLevels == {"RC", "RR", "SER"}
 WriteKinds == {"update", "delete", "lock"}
@@ -101,6 +102,7 @@ DBInit ==
     /\ res = [t \in Txns |-> OkRes({})]
     /\ sread = [t \in Txns |-> {}]
     /\ serlog = <<>>
+    /\ sq = [t \in Txns |-> 0]
 
 -----------------------------------------------------------------------------
 (* Versions and visibility *)
@@ -182,11 +184,11 @@ Complete(t, w, l, r) ==
     /\ IF tx[t].auto
        THEN /\ ApplyCommit(w)
             /\ EndTxn(t)
-            /\ UNCHANGED serlog
+            /\ UNCHANGED <<serlog, sq>>
        ELSE /\ wr' = [wr EXCEPT ![t] = w]
             /\ lk' = l
             /\ stmt' = [stmt EXCEPT ![t] = NoStmt]
-            /\ UNCHANGED <<ver, clock, tx, sread, serlog>>
+            /\ UNCHANGED <<ver, clock, tx, sread, serlog, sq>>
 
 -----------------------------------------------------------------------------
 (* SERIALIZABLE dependency tracking *)
@@ -236,6 +238,7 @@ Begin(t, iso) ==
     /\ tx' = [tx EXCEPT ![t] = [st |-> "active", iso |-> iso, snap |-> -1, auto |-> FALSE]]
     /\ res' = [res EXCEPT ![t] = OkRes({})]
     /\ UNCHANGED <<ver, clock, wr, lk, stmt, sread, serlog>>
+    /\ sq' = [sq EXCEPT ![t] = @ + 1]
 
 \* COMMIT of a failed transaction rolls back (PostgreSQL reports "ROLLBACK").
 \* A SERIALIZABLE COMMIT cannot succeed if it would close a dependency cycle.
@@ -249,18 +252,21 @@ Commit(t) ==
             /\ serlog' = IF tx[t].iso = "SER" THEN Append(serlog, CommitRec(t)) ELSE serlog
             /\ res' = [res EXCEPT ![t] = TagRes("COMMIT")]
     /\ EndTxn(t)
+    /\ sq' = [sq EXCEPT ![t] = @ + 1]
 
 Rollback(t) ==
     /\ stmt[t] = NoStmt /\ tx[t].st \in {"active", "failed"}
     /\ res' = [res EXCEPT ![t] = TagRes("ROLLBACK")]
     /\ UNCHANGED <<ver, clock, serlog>>
     /\ EndTxn(t)
+    /\ sq' = [sq EXCEPT ![t] = @ + 1]
 
 \* Any statement issued in a failed transaction.
 FailedStmt(t) ==
     /\ stmt[t] = NoStmt /\ tx[t].st = "failed"
     /\ res' = [res EXCEPT ![t] = ErrRes("25P02")]
     /\ UNCHANGED <<ver, clock, tx, wr, lk, stmt, sread, serlog>>
+    /\ sq' = [sq EXCEPT ![t] = @ + 1]
 
 -----------------------------------------------------------------------------
 (* Statements *)
@@ -275,6 +281,7 @@ Select(t, tb, P(_, _)) ==
           /\ tx' = [tx EXCEPT ![t] = IF r.auto THEN NoTx ELSE r]
           /\ AddRead(t, r, tb, s, P)
     /\ UNCHANGED <<ver, clock, wr, lk, stmt, serlog>>
+    /\ sq' = [sq EXCEPT ![t] = @ + 1]
 
 \* UPDATE / DELETE / SELECT FOR UPDATE ("lock") ... WHERE P, part 1: take the
 \* statement snapshot and its candidates. Own tuples need no lock; committed
@@ -291,6 +298,7 @@ WriteStart(t, kind, tb, P(_, _)) ==
           /\ tx' = [tx EXCEPT ![t] = r]
           /\ AddRead(t, r, tb, s, P)
     /\ UNCHANGED <<ver, clock, wr, lk, res, serlog>>
+    /\ sq' = [sq EXCEPT ![t] = @ + 1]
 
 \* Silent step: process one committed candidate (any order; PostgreSQL's scan
 \* order is not observable).
@@ -300,14 +308,14 @@ WriteLock(t, k) ==
            s       == stmt[t].snap
            changed == Latest(tb, k)[1] > s
        IN IF changed /\ tx[t].iso # "RC"
-          THEN Fail(t, "40001")                                   \* no waiting first
+          THEN Fail(t, "40001") /\ UNCHANGED sq                   \* no waiting first
           ELSE IF changed /\ ~ChainAlive(tb, k, s)
           THEN /\ stmt' = [stmt EXCEPT ![t].todo = @ \ {k}]       \* tuple deleted: skipped
-               /\ UNCHANGED <<ver, clock, tx, wr, lk, res, sread, serlog>>
+               /\ UNCHANGED <<ver, clock, tx, wr, lk, res, sread, serlog, sq>>
           ELSE /\ lk[tb][k] \in {NoTxn, t}                         \* else wait
                /\ lk' = [lk EXCEPT ![tb][k] = t]
                /\ stmt' = [stmt EXCEPT ![t].todo = @ \ {k}, ![t].locked = @ \cup {k}]
-               /\ UNCHANGED <<ver, clock, tx, wr, res, sread, serlog>>
+               /\ UNCHANGED <<ver, clock, tx, wr, res, sread, serlog, sq>>
 
 \* Part 2, once every candidate is processed. A locked committed tuple is
 \* affected if its newest version still satisfies P (READ COMMITTED re-check;
@@ -336,6 +344,7 @@ InsertStart(t, tb, k, row) ==
     /\ stmt' = [stmt EXCEPT ![t] = [NoStmt EXCEPT !.kind = "insert", !.tb = tb, !.key = k, !.row = row]]
     /\ tx' = [tx EXCEPT ![t] = WithSnap(Eff(t))]
     /\ UNCHANGED <<ver, clock, wr, lk, res, sread, serlog>>
+    /\ sq' = [sq EXCEPT ![t] = @ + 1]
 
 NIdx(tb) == Len(UniqueCols[tb]) + 1
 \* Index i: 1 is the primary key, i > 1 is UniqueCols[tb][i - 1].
@@ -384,7 +393,7 @@ InsertFinish(t) ==
        IN \/ /\ i = 0
              /\ Complete(t, [wr[t] EXCEPT ![s.tb][s.key] = new],
                          [lk EXCEPT ![s.tb][s.key] = t], OkRes({<<s.key, s.row>>}))
-          \/ i # 0 /\ Definite(t, i) /\ Fail(t, "23505")
+          \/ i # 0 /\ Definite(t, i) /\ Fail(t, "23505") /\ UNCHANGED sq
 
 -----------------------------------------------------------------------------
 (* Waiting, deadlocks and serialization failures *)
@@ -417,16 +426,19 @@ WaitReach(t) ==
 DeadlockAbort(t) ==
     /\ Blocked(t) /\ t \in WaitReach(t)
     /\ Fail(t, "40P01")
+    /\ UNCHANGED sq
 
 \* SERIALIZABLE: a statement in flight may fail with a serialization failure.
 SerAbort(t) ==
     /\ tx[t].st = "active" /\ tx[t].iso = "SER" /\ stmt[t] # NoStmt
     /\ Fail(t, "40001")
+    /\ UNCHANGED sq
 
 \* SERIALIZABLE: a SELECT may fail with a serialization failure instead of returning.
 SerSelectFail(t) ==
     /\ CanIssue(t) /\ Eff(t).iso = "SER"
     /\ Fail(t, "40001")
+    /\ sq' = [sq EXCEPT ![t] = @ + 1]
 
 \* SERIALIZABLE: COMMIT may fail with a serialization failure; the transaction ends.
 SerCommitFail(t) ==
@@ -434,6 +446,7 @@ SerCommitFail(t) ==
     /\ res' = [res EXCEPT ![t] = ErrRes("40001")]
     /\ UNCHANGED <<ver, clock, serlog>>
     /\ EndTxn(t)
+    /\ sq' = [sq EXCEPT ![t] = @ + 1]
 
 \* Silent steps an app model must allow alongside its own actions.
 DBSilent ==
