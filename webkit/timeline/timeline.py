@@ -15,7 +15,9 @@ engineer needs to judge it:
   - the committed rows that differ from the initial state, and the violated invariant.
 
 TLC remains the checker and its counterexample the ground truth; this is a view of it.
---schedule-out writes the statement-level order as a draft schedule for step-7 reproduction.
+--schedule-out writes the reproduction schedule for webkit/repro: the order in which each actor
+issues its SQL statements (from WebDB's per-session statement counter `sq`), plus each actor's
+inputs (the arguments of its arrival step), from which a repro script builds the HTTP requests.
 """
 
 from __future__ import annotations
@@ -115,11 +117,16 @@ def main() -> int:
 
     ce = json.loads(args.ce.read_text())["counterexample"]
     steps = []
+    inputs: dict[str, dict] = {}
     for (_, before), info, (_, after) in ce["action"]:
-        actor = info.get("context", {}).get(args.actor_param, "db")
+        ctx = info.get("context", {})
+        actor = ctx.get(args.actor_param, "db")
         kind, text = describe(info["name"], actor, before, after)
+        issued = actor != "db" and after["sq"][actor] > before["sq"][actor]
+        if actor != "db" and before["sq"][actor] == 0 and not issued and actor not in inputs:
+            inputs[actor] = {k: v for k, v in ctx.items() if k != args.actor_param}
         steps.append({"actor": actor, "action": info["name"], "kind": kind, "text": text,
-                      "line": info.get("location", {}).get("beginLine")})
+                      "statement": issued, "line": info.get("location", {}).get("beginLine")})
     first = ce["action"][0][0][1]
     last = ce["action"][-1][2][1]
     actors = sorted({s["actor"] for s in steps if s["actor"] != "db"}) + ["db"]
@@ -140,10 +147,11 @@ def main() -> int:
         print(f"  {line}")
 
     if args.schedule_out:
-        sched = [{"step": n, "actor": s["actor"], "action": s["action"], "kind": s["kind"]}
-                 for n, s in enumerate(steps, 1) if s["kind"] in ("begin", "start", "finish", "select", "commit", "end")]
+        order = [{"step": n, "actor": s["actor"], "action": s["action"], "text": s["text"]}
+                 for n, s in enumerate(steps, 1) if s["statement"]]
+        sched = {"invariant": args.invariant, "actors": sorted(inputs), "inputs": inputs, "order": order}
         args.schedule_out.write_text(json.dumps(sched, indent=2) + "\n")
-        print(f"\nDraft reproduction schedule ({len(sched)} statement events): {args.schedule_out}")
+        print(f"\nReproduction schedule ({len(order)} statements, in counterexample order): {args.schedule_out}")
     return 0
 
 

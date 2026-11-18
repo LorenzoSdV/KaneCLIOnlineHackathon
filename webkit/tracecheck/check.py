@@ -10,6 +10,12 @@ the model that matches every event (it reports TraceNotDone violated).
 For a REJECTED trace the checker finds the largest number of events the model can match,
 reads the matched set from TLC's counterexample, and reports the events that were ready to
 match next but could not be: that is where model and implementation disagree.
+
+    check.py ... --violates NoNegativeStock --invariants-module ShopInvariants TRACE
+
+checks a reproduction instead: is there a behavior that matches the whole trace AND ends in a
+state violating the invariant? REPRODUCED means the recorded run is that bug, as the model
+defines it (step 7's "verify you triggered the right bug").
 """
 
 from __future__ import annotations
@@ -31,15 +37,20 @@ CLASSPATH = f"{LIB / 'tla2tools.jar'}{os.pathsep}{LIB / 'CommunityModules-deps.j
 DONE_RE = re.compile(r"/\\ done = \{([^}]*)\}")
 
 
-def tlc(spec: Path, template: str, trace: Path, cut: str, work: Path) -> tuple[str, str]:
+def tlc(spec: Path, template: str, trace: Path, cut: str, work: Path,
+        invariant: str = "TraceNotDone") -> tuple[str, str]:
     cfg = work / "trace.cfg"
-    cfg.write_text(template.replace("@TRACE@", str(trace.resolve())).replace("@CUT@", cut))
-    cmd = ["java", "-XX:+UseParallelGC", "-Xss16m", f"-DTLA-Library={TLA_LIB}", "-cp", CLASSPATH,
+    text = template.replace("@TRACE@", str(trace.resolve())).replace("@CUT@", cut)
+    if invariant != "TraceNotDone":
+        text = text.replace("INVARIANT TraceNotDone", f"INVARIANT {invariant}")
+    cfg.write_text(text)
+    lib = os.pathsep.join([str(spec.resolve().parent), str(TLA_LIB)])
+    cmd = ["java", "-XX:+UseParallelGC", "-Xss16m", f"-DTLA-Library={lib}", "-cp", CLASSPATH,
            "tlc2.TLC", "-config", str(cfg), "-workers", "auto", "-noGenerateSpecTE",
            "-metadir", str(work / "meta"), str(spec.resolve())]
     p = subprocess.run(cmd, capture_output=True, text=True, cwd=spec.resolve().parent, timeout=3600)
     out = p.stdout + p.stderr
-    if "Invariant TraceNotDone is violated" in out:
+    if f"Invariant {invariant} is violated" in out:
         return "matched", out
     if "Model checking completed. No error has been found." in out:
         return "unmatched", out
@@ -61,6 +72,38 @@ def ready_after(evs: list[dict], done: set[int]) -> list[int]:
         if all(i in done for i in preds):
             out.append(j)
     return out
+
+
+def check_violates(spec: Path, template: str, trace: Path, inv: str, inv_module: str) -> dict:
+    """Does some behavior match the whole trace and end violating inv?"""
+    with tempfile.TemporaryDirectory(prefix="wkrepro-") as tmp:
+        work = Path(tmp)
+        wrapper = work / "TraceViolates.tla"
+        wrapper.write_text(f"---- MODULE TraceViolates ----\nEXTENDS {spec.stem}, {inv_module}\n"
+                           f"MatchedAndViolated == ~(Cardinality(done) = TraceLen /\\ ~({inv}))\n====\n")
+        verdict, out = tlc_wrapped(wrapper, spec, template, trace, work)
+    result = {"trace": str(trace), "invariant": inv, "events": len(events(trace))}
+    result["verdict"] = {"matched": "reproduced", "unmatched": "not_reproduced"}.get(verdict, "error")
+    if verdict == "error":
+        result["tlc_output"] = out[-4000:]
+    return result
+
+
+def tlc_wrapped(wrapper: Path, spec: Path, template: str, trace: Path, work: Path) -> tuple[str, str]:
+    cfg = work / "trace.cfg"
+    cfg.write_text(template.replace("@TRACE@", str(trace.resolve())).replace("@CUT@", "<- TraceLen")
+                   .replace("INVARIANT TraceNotDone", "INVARIANT MatchedAndViolated"))
+    lib = os.pathsep.join([str(spec.resolve().parent), str(TLA_LIB)])
+    cmd = ["java", "-XX:+UseParallelGC", "-Xss16m", f"-DTLA-Library={lib}", "-cp", CLASSPATH,
+           "tlc2.TLC", "-config", str(cfg), "-workers", "auto", "-noGenerateSpecTE",
+           "-metadir", str(work / "meta"), str(wrapper)]
+    p = subprocess.run(cmd, capture_output=True, text=True, cwd=work, timeout=3600)
+    out = p.stdout + p.stderr
+    if "Invariant MatchedAndViolated is violated" in out:
+        return "matched", out
+    if "Model checking completed. No error has been found." in out:
+        return "unmatched", out
+    return "error", out
 
 
 def check(spec: Path, template: str, trace: Path) -> dict:
@@ -98,10 +141,26 @@ def main() -> int:
     ap.add_argument("--template", type=Path, required=True)
     ap.add_argument("--jobs", type=int, default=2)
     ap.add_argument("--report", type=Path)
+    ap.add_argument("--violates", help="invariant a reproduction trace must end up violating")
+    ap.add_argument("--invariants-module", help="module defining the --violates invariant")
     ap.add_argument("traces", nargs="+", type=Path)
     args = ap.parse_args()
     template = args.template.read_text()
     traces = sorted(t for p in args.traces for t in ([p] if p.is_file() else p.glob("*.ndjson")))
+    if args.violates:
+        if not args.invariants_module:
+            sys.exit("--violates needs --invariants-module")
+        with ThreadPoolExecutor(args.jobs) as pool:
+            results = list(pool.map(lambda t: check_violates(args.spec, template, t, args.violates,
+                                                              args.invariants_module), traces))
+        ok = sum(r["verdict"] == "reproduced" for r in results)
+        print(f"{len(results)} traces: {ok} reproduce a violation of {args.violates}")
+        for r in results:
+            print(f"  {r['verdict'].upper():15} {Path(r['trace']).name} ({r['events']} events)"
+                  + (f"\n{r['tlc_output']}" if r["verdict"] == "error" else ""))
+        if args.report:
+            args.report.write_text(json.dumps(results, indent=2))
+        return 0 if ok == len(results) else 1
     with ThreadPoolExecutor(args.jobs) as pool:
         results = list(pool.map(lambda t: check(args.spec, template, t), traces))
 

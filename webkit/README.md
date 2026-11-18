@@ -62,6 +62,16 @@ Every line has `src`, `ev` and `ts_ns` (wall-clock nanoseconds when written).
 The app-specific parts are three files. The model (e.g. `Shop.tla`, built on `WebDB`) and its trace spec
 (`TraceShop.tla`) are what the agent writes in a pipeline run. The mapping file is configuration.
 
+## Model checking and reproduction (M4, M5)
+
+| Piece | What it does |
+|---|---|
+| `timeline/timeline.py` | Turns TLC's JSON counterexample into request lanes in SQL terms: reads, lock waits, commits, HTTP status. With `--schedule-out` it writes the order of statement starts (from WebDB's `sq` counter) plus each actor's inputs |
+| `repro/schedule_from_tlc.py` | Runs a hunt config, then the timeline, to produce a schedule |
+| `cmd/pgproxy` gate (`gate.go`) | Holds every statement of the gated requests before it reaches PostgreSQL, until released. Control API on port 6433: `/gate`, `/held`, `/release`, `/conns` (sent/finished counts, lock waits, blockers) |
+| `repro/scheduler.py` | Replays a schedule: concurrent requests, statements released one at a time in counterexample order, waiting after each until it completes or is waiting on a lock (Level 1 reproduction: no app changes). `LockBlocked` means the schedule needs a request to proceed while the database holds it on a lock, which is evidence of a missing lock in the model |
+| `tracecheck/check.py --violates INV` | Same-bug check: the reproduction's own trace must be matched by the model **and** end violating `INV` |
+
 ### Limits (known, to address in later milestones)
 
 - **Autocommit writes have no xid.** The xid is captured only before an explicit `COMMIT`. Such writes are matched to CDC by table and time interval in the trace builder (M3).
