@@ -8,7 +8,7 @@
 (* configs narrow Inputs to one scenario each (scenario projection by      *)
 (* action bounds).                                                         *)
 (***************************************************************************)
-EXTENDS Shop
+EXTENDS ShopInvariants
 
 CONSTANT Inputs   \* set of request inputs an actor may send
 
@@ -44,25 +44,6 @@ MCNext ==
     \/ DBSilent /\ UNCHANGED appVars
 
 MCSpec == MCInit /\ [][MCNext]_vars
-
-\* Invariants -------------------------------------------------------------------
-
-\* README: "stock never goes negative".
-NoNegativeStock == \A k \in CommittedKeys("Product") : Committed("Product", k).stock >= 0
-
-\* README: a retried checkout with the same Idempotency-Key returns the original order.
-OneOrderPerIdempotencyKey ==
-    \A k1, k2 \in CommittedKeys("Order") :
-        LET o1 == Committed("Order", k1)
-            o2 == Committed("Order", k2)
-        IN (k1 # k2 /\ o1.idempotencyKey # "" /\ o1.userId = o2.userId) => o1.idempotencyKey # o2.idempotencyKey
-
-\* README: "each coupon can be redeemed at most once per user".
-CouponOncePerUser ==
-    \A k1, k2 \in CommittedKeys("CouponRedemption") :
-        LET a == Committed("CouponRedemption", k1)
-            b == Committed("CouponRedemption", k2)
-        IN k1 # k2 => ~(a.couponId = b.couponId /\ a.userId = b.userId)
 
 \* Every committed order's stock was available: orders of a product never exceed its initial stock
 \* plus cancellations (cross-entity consistency).

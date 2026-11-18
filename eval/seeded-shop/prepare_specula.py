@@ -117,7 +117,7 @@ def main() -> int:
         shutil.rmtree(wd)
     spec = wd / "spec"
     spec.mkdir(parents=True)
-    for f in ["Shop.tla", "TraceShop.tla", "MC.tla", "MC.cfg", "MC_hunt_last_item.cfg",
+    for f in ["Shop.tla", "ShopInvariants.tla", "TraceShop.tla", "MC.tla", "MC.cfg", "MC_hunt_last_item.cfg",
               "MC_hunt_retry.cfg", "MC_hunt_coupon.cfg"]:
         shutil.copy(SPEC / f, spec / f)
     for f in ["WebDB.tla", "WebTrace.tla"]:
