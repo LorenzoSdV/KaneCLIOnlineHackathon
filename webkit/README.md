@@ -79,3 +79,27 @@ The app-specific parts are three files. The model (e.g. `Shop.tla`, built on `We
 - **The proxy only records for now.** Holding and releasing statements for deterministic reproduction comes in M5.
 - **No egress proxy yet.** It's added with the payment-provider module in M7.
 - **`COPY` and multi-statement simple queries** are forwarded correctly but recorded only coarsely.
+
+## M6: pipeline integration (stack lifecycle, workloads, coverage)
+
+Specula's orchestrator now owns the stack (see `Specula/src/specula/stacklib.py`):
+
+- `stack/wkstack.py ensure|status|reset --config stack.toml --runs-dir DIR`: reuse the running
+  stack if it runs this exact config and passes the self-test, otherwise (re)start it from a clean
+  project; `status` prints JSON (URLs, recordings dir, last self-test); `reset` reseeds the database
+  with the app's own command (`[app].reset`). The self-test also runs `reset` and requires its
+  commit in logical decoding, and writes `<run>/selftest.json`.
+- `workload/runner.py run|rebuild`: run an app's `SCENARIOS` (a `workloads.py`) through the stack,
+  reset the database before each run, record windows in `traces/windows.json`, build one trace per
+  run; `rebuild` rebuilds every trace from the recordings after a mapping change.
+- `tracecheck/coverage.py --mapping mapping.toml traces/`: every mapped action in some trace, and
+  overlapping actors in every concurrent scenario.
+- `tracecheck/check.py --explain`: for a rejected trace, the stuck events' recorded fields and the
+  model state after the matched prefix.
+
+```bash
+python3 webkit/stack/wkstack.py ensure --config eval/seeded-shop/stack.toml
+python3 webkit/workload/runner.py run --stack eval/seeded-shop/stack.toml \
+    --mapping eval/seeded-shop/mapping.toml --workloads eval/seeded-shop/workloads.py --traces /tmp/traces
+python3 webkit/tracecheck/coverage.py --mapping eval/seeded-shop/mapping.toml /tmp/traces
+```

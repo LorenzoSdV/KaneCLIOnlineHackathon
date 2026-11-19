@@ -38,6 +38,10 @@ NONE_TEXT = ""
 COMMENT_RE = re.compile(r"/\*.*?\*/", re.S)
 
 
+class BuildError(SystemExit):
+    """Unmapped requests or statements, or records that cannot be joined (exits like sys.exit)."""
+
+
 def read(path: Path) -> list[dict]:
     if not path.exists():
         return []
@@ -235,7 +239,7 @@ def build(run: Path, mapping: Mapping, since: int, until: int | None) -> list[di
         events.extend(seq)
 
     if errors:
-        sys.exit("trace build failed:\n  " + "\n  ".join(errors))
+        raise BuildError("trace build failed:\n  " + "\n  ".join(errors))
 
     state = initial_state(cdc, mapping, since)
     seq_floor = {t: (max(rows) + 1 if rows else 1) for t, rows in state.items()}

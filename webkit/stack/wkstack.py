@@ -5,11 +5,17 @@ The app's own compose file is never edited. This tool generates a compose
 override from a small per-app stack config (TOML) and runs both together:
 
     wkstack.py up       --config stack.toml   start app + recorders, new run dir
-    wkstack.py selftest --config stack.toml   check every signal source
-    wkstack.py down     --config stack.toml   stop and remove containers
+    wkstack.py selftest --config stack.toml   check every signal source (result: <run>/selftest.json)
+    wkstack.py ensure   --config stack.toml   reuse the running, self-tested stack or (re)start it
+    wkstack.py status   --config stack.toml   JSON: running?, run id, URLs, last self-test
+    wkstack.py reset    --config stack.toml   reseed the database with the app's own command
+    wkstack.py down     --config stack.toml   stop and remove containers (recordings are kept)
     wkstack.py overlay  --config stack.toml   print the generated override
 
-Recorders added around the app (all output goes to runs/<run-id>/):
+All commands take --runs-dir DIR (env WK_RUNS_DIR; default <repo>/runs): where run directories
+and the current-stack state file live.
+
+Recorders added around the app (all output goes to <runs-dir>/<run-id>/):
     wk-inbound  reverse proxy in front of the app      -> inbound.ndjson
     wk-pgproxy  PostgreSQL wire proxy (+ hold/release control API on host port 6433) -> pgproxy.ndjson
     wk-cdc      logical decoding of committed changes  -> cdc.ndjson
@@ -25,6 +31,7 @@ Stack config (TOML):
     runtime = "node"                   # "node" loads the OTel bootstrap; "none" skips it
     probe_path = "/products/1"         # GET path that touches the DB, for the self-test
     health_path = "/health"
+    reset = ["npm", "run", "-s", "db:seed"]  # app's own seed/reset command, run in the app container
 
     [app.env]                          # extra env for the app (optional)
     DB_POOL_SIZE = "2"
@@ -46,6 +53,7 @@ Stack config (TOML):
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import subprocess
@@ -69,6 +77,8 @@ def load_config(path: Path) -> dict:
     with path.open("rb") as f:
         cfg = tomllib.load(f)
     cfg["_dir"] = path.resolve().parent
+    cfg["_path"] = path.resolve()
+    cfg["_sha256"] = hashlib.sha256(path.read_bytes()).hexdigest()
     return cfg
 
 
@@ -165,6 +175,10 @@ def state_file(cfg: dict) -> Path:
     return RUNS / f".current-{cfg['app']['project']}.json"
 
 
+def base_url(cfg: dict) -> str:
+    return f"http://localhost:{cfg.get('inbound', {}).get('host_port', 8080)}"
+
+
 def cmd_up(cfg: dict, args: argparse.Namespace) -> None:
     run_id = args.run_id or datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ") + "-" + uuid.uuid4().hex[:6]
     if cfg["app"].get("runtime") == "node" and not (WEBKIT / "otel" / "node" / "node_modules").exists():
@@ -174,14 +188,19 @@ def cmd_up(cfg: dict, args: argparse.Namespace) -> None:
     out_dir.mkdir(parents=True, exist_ok=False)
     overlay = out_dir / "compose.webkit.yaml"
     overlay.write_text(overlay_yaml(cfg, out_dir))
+    # Start from a clean project: containers or volumes left by another stack instance of the same
+    # compose project (e.g. a different runs dir) would otherwise skip migrations and seeding.
+    subprocess.run(compose_cmd(cfg, overlay) + ["down", "-v", "--remove-orphans"], capture_output=True)
     cmd = compose_cmd(cfg, overlay) + ["up", "-d", "--build", "--wait"]
     print("+", " ".join(cmd), flush=True)
     subprocess.run(cmd, check=True)
-    state = {"run_id": run_id, "out_dir": str(out_dir), "overlay": str(overlay)}
+    state = {"run_id": run_id, "out_dir": str(out_dir), "overlay": str(overlay),
+             "config": str(cfg["_path"]), "config_sha256": cfg["_sha256"], "base_url": base_url(cfg),
+             "control_url": f"http://localhost:{cfg.get('inbound', {}).get('control_port', 6433)}",
+             "started_at": datetime.now(timezone.utc).isoformat()}
     state_file(cfg).write_text(json.dumps(state, indent=2))
-    base = f"http://localhost:{cfg.get('inbound', {}).get('host_port', 8080)}"
-    wait_http(base + cfg["app"].get("health_path", "/"), timeout=120)
-    print(f"up: run {run_id}; app via {base}; recordings in {out_dir}")
+    wait_http(base_url(cfg) + cfg["app"].get("health_path", "/"), timeout=120)
+    print(f"up: run {run_id}; app via {base_url(cfg)}; recordings in {out_dir}")
 
 
 def current(cfg: dict) -> dict:
@@ -239,15 +258,27 @@ def span_trace_ids(path: Path) -> set[str]:
     return ids
 
 
-def cmd_selftest(cfg: dict, _args: argparse.Namespace) -> None:
+def selftest(cfg: dict) -> bool:
+    """Probe the app once and check every signal source; record the result in the run dir."""
     st = current(cfg)
     out = Path(st["out_dir"])
-    base = f"http://localhost:{cfg.get('inbound', {}).get('host_port', 8080)}"
+    started_ns = time.time_ns()
+    reset_error = ""
+    if cfg["app"].get("reset"):
+        try:
+            run_reset(cfg)
+        except RuntimeError as e:
+            reset_error = str(e)
     trace_id = uuid.uuid4().hex
-    req = urllib.request.Request(base + cfg["app"]["probe_path"],
+    req = urllib.request.Request(base_url(cfg) + cfg["app"]["probe_path"],
                                  headers={"traceparent": f"00-{trace_id}-{uuid.uuid4().hex[:16]}-01"})
-    with urllib.request.urlopen(req, timeout=10) as r:
-        probe_status = r.status
+    try:
+        with urllib.request.urlopen(req, timeout=10) as r:
+            probe_status = r.status
+    except urllib.error.HTTPError as e:
+        probe_status = e.code
+    except (urllib.error.URLError, ConnectionError, TimeoutError) as e:
+        probe_status = f"unreachable ({e})"
     time.sleep(1.5)  # let the span exporter and file writers flush
 
     inbound = read_events(out / "inbound.ndjson")
@@ -263,30 +294,117 @@ def cmd_selftest(cfg: dict, _args: argparse.Namespace) -> None:
         ("pgproxy: probe SQL attributed to the probe request (sqlcommenter)",
          any(e.get("ev") == "stmt" and e.get("trace_id") == trace_id for e in pgproxy)),
         ("cdc: replication stream ready", any(e.get("ev") == "ready" for e in cdc)),
-        ("cdc: committed transactions captured (migrations/seed)", any(e.get("ev") == "txn" for e in cdc)),
+        *([("app: reset command ([app].reset) succeeds", not reset_error),
+           ("cdc: the reset's committed transactions captured",
+            any(e.get("ev") == "txn" and int(e.get("ts_ns", 0)) >= started_ns
+                for e in cdc))]
+          if cfg["app"].get("reset") else
+          [("cdc: committed transactions captured (migrations/seed)", any(e.get("ev") == "txn" for e in cdc))]),
         ("otel: spans for the probe request exported", trace_id in spans),
     ]
+    ok = all(passed for _, passed in checks)
     width = max(len(name) for name, _ in checks)
     print(f"selftest: run {st['run_id']}, probe GET {cfg['app']['probe_path']} -> {probe_status}")
-    for name, ok in checks:
-        print(f"  {'PASS' if ok else 'FAIL'}  {name.ljust(width)}")
-    if not all(ok for _, ok in checks):
+    if reset_error:
+        print(f"  reset failed: {reset_error}")
+    for name, passed in checks:
+        print(f"  {'PASS' if passed else 'FAIL'}  {name.ljust(width)}")
+    (out / "selftest.json").write_text(json.dumps({
+        "ok": ok, "at": datetime.now(timezone.utc).isoformat(), "at_ns": time.time_ns(),
+        "run_id": st["run_id"], "config_sha256": cfg["_sha256"], "probe_status": probe_status,
+        "checks": [{"name": n, "ok": p} for n, p in checks]}, indent=2))
+    return ok
+
+
+def cmd_selftest(cfg: dict, _args: argparse.Namespace) -> None:
+    if not selftest(cfg):
         sys.exit(1)
+
+
+def running(cfg: dict) -> bool:
+    """The recorded stack's app and recorders are up and the app answers through the inbound proxy."""
+    if not state_file(cfg).exists():
+        return False
+    st = current(cfg)
+    if st.get("config_sha256") != cfg["_sha256"] or not Path(st["overlay"]).exists():
+        return False
+    ps = subprocess.run(compose_cmd(cfg, Path(st["overlay"])) + ["ps", "--status", "running", "--services"],
+                        capture_output=True, text=True)
+    services = set(ps.stdout.split())
+    if ps.returncode != 0 or not {cfg["app"]["service"], "wk-pgproxy", "wk-cdc", "wk-inbound"} <= services:
+        return False
+    try:
+        with urllib.request.urlopen(base_url(cfg) + cfg["app"].get("health_path", "/"), timeout=3) as r:
+            return r.status < 500
+    except (urllib.error.URLError, ConnectionError, TimeoutError):
+        return False
+
+
+def cmd_status(cfg: dict, _args: argparse.Namespace) -> None:
+    st = json.loads(state_file(cfg).read_text()) if state_file(cfg).exists() else {}
+    result = Path(st["out_dir"]) / "selftest.json" if st else None
+    print(json.dumps({"running": running(cfg), "config_sha256": cfg["_sha256"], **st,
+                      "selftest": json.loads(result.read_text()) if result and result.exists() else None},
+                     indent=2))
+
+
+def cmd_ensure(cfg: dict, args: argparse.Namespace) -> None:
+    """Reuse the recorded stack if it is running this exact config and passes the self-test;
+    otherwise (re)start it. Exits non-zero unless a self-tested stack is running afterwards."""
+    if running(cfg):
+        print(f"ensure: reusing run {current(cfg)['run_id']}")
+        if selftest(cfg):
+            return
+        print("ensure: self-test failed on the running stack; restarting it")
+    if state_file(cfg).exists():
+        cmd_down(cfg, args)
+    cmd_up(cfg, args)
+    if not selftest(cfg):
+        sys.exit(1)
+
+
+def run_reset(cfg: dict) -> None:
+    """Return the database to the app's seeded state with the app's own command ([app].reset)."""
+    reset = cfg["app"].get("reset")
+    if not reset:
+        raise RuntimeError("stack config has no [app].reset command (the app's own seed/reset command)")
+    st = current(cfg)
+    argv = reset if isinstance(reset, list) else ["sh", "-c", reset]
+    p = subprocess.run(compose_cmd(cfg, Path(st["overlay"])) + ["exec", "-T", cfg["app"]["service"], *argv],
+                       capture_output=True, text=True)
+    if p.returncode != 0:
+        raise RuntimeError(f"exit {p.returncode}:\n{p.stdout}{p.stderr}")
+
+
+def cmd_reset(cfg: dict, _args: argparse.Namespace) -> None:
+    try:
+        run_reset(cfg)
+    except RuntimeError as e:
+        sys.exit(f"reset failed: {e}")
 
 
 def cmd_overlay(cfg: dict, _args: argparse.Namespace) -> None:
     print(overlay_yaml(cfg, RUNS / "<run-id>"), end="")
 
 
+COMMANDS = {"up": cmd_up, "down": cmd_down, "selftest": cmd_selftest, "status": cmd_status,
+            "ensure": cmd_ensure, "reset": cmd_reset, "overlay": cmd_overlay}
+
+
 def main() -> None:
+    global RUNS
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("command", choices=["up", "down", "selftest", "overlay"])
+    p.add_argument("command", choices=list(COMMANDS))
     p.add_argument("--config", required=True, type=Path)
+    p.add_argument("--runs-dir", type=Path, default=Path(os.environ["WK_RUNS_DIR"]) if os.environ.get("WK_RUNS_DIR") else None,
+                   help="where run directories and the current-stack state live (default: <repo>/runs; env WK_RUNS_DIR)")
     p.add_argument("--run-id")
     args = p.parse_args()
+    if args.runs_dir:
+        RUNS = args.runs_dir.resolve()
     cfg = load_config(args.config)
-    RUNS.mkdir(exist_ok=True)
-    {"up": cmd_up, "down": cmd_down, "selftest": cmd_selftest, "overlay": cmd_overlay}[args.command](cfg, args)
+    RUNS.mkdir(parents=True, exist_ok=True)
+    COMMANDS[args.command](cfg, args)
 
 
 if __name__ == "__main__":

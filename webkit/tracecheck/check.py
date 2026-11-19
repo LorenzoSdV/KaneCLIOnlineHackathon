@@ -9,7 +9,9 @@ the model that matches every event (it reports TraceNotDone violated).
 
 For a REJECTED trace the checker finds the largest number of events the model can match,
 reads the matched set from TLC's counterexample, and reports the events that were ready to
-match next but could not be: that is where model and implementation disagree.
+match next but could not be: that is where model and implementation disagree. --explain also
+prints what was recorded for those events (rows, error code, row count, status) and the model's
+state after the matched prefix, so the two can be compared directly.
 
     check.py ... --violates NoNegativeStock --invariants-module ShopInvariants TRACE
 
@@ -55,6 +57,20 @@ def tlc(spec: Path, template: str, trace: Path, cut: str, work: Path,
     if "Model checking completed. No error has been found." in out:
         return "unmatched", out
     return "error", out
+
+
+RECORDED_FIELDS = ("kind", "phase", "args", "rows", "count", "err", "writes", "status", "resp", "limit1")
+STATE_RE = re.compile(r"^State (\d+): .*$", re.M)
+
+
+def last_state(out: str) -> str:
+    """The last state of TLC's counterexample: the model state after the matched prefix."""
+    starts = list(STATE_RE.finditer(out))
+    if not starts:
+        return ""
+    block = out[starts[-1].start():]
+    end = re.search(r"\n\s*\n", block)
+    return (block[:end.start()] if end else block).strip()
 
 
 def events(trace: Path) -> list[dict]:
@@ -130,7 +146,10 @@ def check(spec: Path, template: str, trace: Path) -> dict:
                 found = DONE_RE.findall(out)
                 if found:
                     done = {int(x) for x in found[-1].replace(" ", "").split(",") if x}
-            result["stuck_at"] = [{"event": j, "actor": evs[j - 1]["actor"], "action": evs[j - 1]["action"]}
+                result["state_at_stuck"] = last_state(out)
+            result["stuck_at"] = [{"event": j, "actor": evs[j - 1]["actor"], "action": evs[j - 1]["action"],
+                                   "recorded": {k: v for k, v in evs[j - 1].items()
+                                                if k in RECORDED_FIELDS and v not in ("", [], {"none": 0}, False)}}
                                   for j in ready_after(evs, done)]
     return result
 
@@ -141,6 +160,8 @@ def main() -> int:
     ap.add_argument("--template", type=Path, required=True)
     ap.add_argument("--jobs", type=int, default=2)
     ap.add_argument("--report", type=Path)
+    ap.add_argument("--explain", action="store_true",
+                    help="for rejected traces, print the stuck events' recorded fields and the model state")
     ap.add_argument("--violates", help="invariant a reproduction trace must end up violating")
     ap.add_argument("--invariants-module", help="module defining the --violates invariant")
     ap.add_argument("traces", nargs="+", type=Path)
@@ -174,6 +195,12 @@ def main() -> int:
             stuck = ", ".join(f"#{s['event']} {s['actor']} {s['action']}" for s in r["stuck_at"])
             print(f"  REJECTED  {name}: model matches at most {r['max_matched']}/{r['events']} events; "
                   f"could not match next: {stuck}")
+            if args.explain:
+                for s in r["stuck_at"]:
+                    print(f"      recorded #{s['event']} {s['actor']} {s['action']}: {json.dumps(s['recorded'])}")
+                if r.get("state_at_stuck"):
+                    print("      model state after the matched prefix:")
+                    print("\n".join("        " + line for line in r["state_at_stuck"].splitlines()))
         else:
             print(f"  ERROR     {name}:\n{r['tlc_output']}")
     if args.report:

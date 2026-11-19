@@ -8,6 +8,7 @@ service = "app"
 port = 3000
 runtime = "node"
 health_path = "/health"
+reset = ["npm", "run", "-s", "db:seed"]   # the app's own seed command, run in the app container
 probe_path = "/products/1"
 
 [app.env]
